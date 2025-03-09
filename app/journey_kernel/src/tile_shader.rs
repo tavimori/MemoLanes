@@ -4,6 +4,7 @@ use image::GenericImage;
 use image::Rgba;
 use image::RgbaImage;
 use image::SubImage;
+use crate::utils::{DEFAULT_TILE_SIZE, DEFAULT_TILE_SIZE_POWER, DEFAULT_BG_COLOR, DEFAULT_FG_COLOR};
 
 const TILE_ZOOM: i16 = 9;
 
