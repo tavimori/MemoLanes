@@ -5,9 +5,9 @@ mod shared;
 use shared::MapServer;
 
 use rand::Rng;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const START_LNG: f64 = 151.14;
