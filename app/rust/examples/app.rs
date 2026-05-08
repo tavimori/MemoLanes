@@ -3,6 +3,7 @@ use memolanes_core::api::api::for_testing::get_main_map_state;
 use memolanes_core::api::api::{import_archive, init, init_main_map};
 use memolanes_core::journey_data::serialize_journey_bitmap;
 mod shared;
+use memolanes_core::api::import::OpaqueMldxReader;
 use memolanes_core::renderer::MapRenderer;
 use shared::MapServer;
 use std::fs::File;
@@ -70,8 +71,11 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check if an MLDX file path is provided as an option or positional argument.
     if let Some(mldx_file_path) = cli.import_mldx.or(cli.mldx_file) {
         println!("Importing MLDX file: {mldx_file_path}");
-        match import_archive(mldx_file_path) {
-            Ok(_) => println!("Successfully imported MLDX file"),
+        let mldx_file = OpaqueMldxReader::open(mldx_file_path.to_string())?;
+        match mldx_file.import_journeys(None) {
+            Ok(()) => {
+                println!("Successfully imported archive.");
+            }
             Err(e) => eprintln!("Failed to import MLDX file: {e:?}"),
         }
         return Ok(());
