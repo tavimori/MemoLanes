@@ -47,7 +47,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         ".".to_string(),
     );
 
-    let _ = init_main_map();
+    init_main_map()?;
 
     if let Some(output_path) = cli.export_jbm {
         let output_path = if output_path.ends_with(".jbm") {

@@ -7,6 +7,7 @@ use shared::MapServer;
 use rand::Rng;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const START_LNG: f64 = 151.14;
@@ -70,9 +71,9 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Simple Map Local]:    {}", server_simple.get_file_url());
 
     // ========== Server 2: Medium Map (loaded from fow_3.zip) ==========
-    let (joruney_bitmap_fow, _) =
+    let (journey_bitmap_fow, _) =
         import_data::load_fow_sync_data("./tests/data/fow_3.zip").unwrap();
-    let map_renderer_fow = Arc::new(Mutex::new(MapRenderer::new(joruney_bitmap_fow)));
+    let map_renderer_fow = Arc::new(Mutex::new(MapRenderer::new(journey_bitmap_fow)));
     let server_medium =
         MapServer::create_and_start(map_renderer_fow).expect("Failed to start medium map server");
 
@@ -120,25 +121,29 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Graceful shutdown on Ctrl+C
     println!("Press Ctrl+C to exit");
-    let server_simple_clone = server_simple.clone();
-    let server_medium_clone = server_medium.clone();
-    let server_dynamic_clone = server_dynamic.clone();
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_requested_clone = shutdown_requested.clone();
     ctrlc::set_handler(move || {
-        println!("Ctrl+C pressed. Stopping all servers...");
-        if let Ok(mut server) = server_simple_clone.lock() {
-            let _ = server.stop();
-        }
-        if let Ok(mut server) = server_medium_clone.lock() {
-            let _ = server.stop();
-        }
-        if let Ok(mut server) = server_dynamic_clone.lock() {
-            let _ = server.stop();
-        }
-        std::process::exit(0);
+        println!("Ctrl+C pressed. Beginning graceful shutdown...");
+        shutdown_requested_clone.store(true, Ordering::SeqCst);
     })?;
 
     // Block the main thread to keep all servers running
-    loop {
+    while !shutdown_requested.load(Ordering::SeqCst) {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+
+    println!("Stopping all servers...");
+    if let Ok(mut server) = server_simple.lock() {
+        let _ = server.stop();
+    }
+    if let Ok(mut server) = server_medium.lock() {
+        let _ = server.stop();
+    }
+    if let Ok(mut server) = server_dynamic.lock() {
+        let _ = server.stop();
+    }
+
+    println!("Shutdown complete.");
+    Ok(())
 }
