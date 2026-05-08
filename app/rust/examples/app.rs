@@ -1,6 +1,6 @@
 use clap::Parser;
 use memolanes_core::api::api::for_testing::get_main_map_state;
-use memolanes_core::api::api::{import_archive, init, init_main_map};
+use memolanes_core::api::api::{init, init_main_map};
 use memolanes_core::journey_data::serialize_journey_bitmap;
 mod shared;
 use memolanes_core::api::import::OpaqueMldxReader;
