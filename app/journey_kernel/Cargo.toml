@@ -14,7 +14,8 @@ wasm = ["wasm-bindgen", "console_error_panic_hook", "wasm-bindgen-futures"]
 console_error_panic_hook = ["dep:console_error_panic_hook"]
 
 [dependencies]
-wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen = { version = "0.2.106", optional = true }
+fogcore = { path = "/Users/licheng/Projects/fogcore", default-features = false, features = ["wasm"] }
 
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
@@ -23,7 +24,7 @@ wasm-bindgen = { version = "0.2", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
 serde = { version = "1.0", features = ["derive"] }
-wasm-bindgen-futures = { version = "0.4", optional = true }
+wasm-bindgen-futures = { version = "0.4.68", optional = true }
 # TODO: upgrade to bincode 3.0
 bincode = "1.0"
 
