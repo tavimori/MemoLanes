@@ -30,7 +30,7 @@ pub fn index_to_xy(index: usize, width_exp: i16) -> (i64, i64) {
 pub(crate) fn bitvec_to_bytes_lsb(bits: &BitVec) -> Vec<u8> {
     let byte_count = bits.len().div_ceil(8);
     let raw_words = bits.as_raw_slice();
-    let mut out = Vec::with_capacity(raw_words.len() * core::mem::size_of::<usize>());
+    let mut out = Vec::with_capacity(std::mem::size_of_val(raw_words));
     for &word in raw_words {
         out.extend_from_slice(&word.to_le_bytes());
     }
@@ -57,7 +57,7 @@ pub(crate) fn bitvec_from_bytes_lsb(bytes: &[u8], bit_count: usize) -> BitVec {
         }
         let mut bitvec = BitVec::from_vec(words);
         bitvec.truncate(bit_count);
-        return bitvec;
+        bitvec
     }
 
     #[cfg(not(target_endian = "little"))]
@@ -230,11 +230,10 @@ impl GenericTile {
         let mut initial_level = BitVec::with_capacity((width * width) as usize);
         initial_level.resize((width * width) as usize, false);
 
-        for byte_idx in 0..data.len() {
-            let byte = data[byte_idx];
+        for (byte_idx, byte) in data.iter().enumerate() {
             for bit_idx in 0..8 {
                 let pixel_idx = byte_idx * 8 + bit_idx;
-                initial_level.set(pixel_idx, ((byte >> (7 - bit_idx)) & 1) == 1);
+                initial_level.set(pixel_idx, ((*byte >> (7 - bit_idx)) & 1) == 1);
             }
         }
 
@@ -370,7 +369,7 @@ impl GenericTile {
             let pixel_repeat = 1usize << (overscan - k);
             let out_side = 1usize << (resolution_exp as usize - k);
             let bits_per_word = usize::BITS as usize;
-            let word_count = (out_side * out_side + bits_per_word - 1) / bits_per_word;
+            let word_count = (out_side * out_side).div_ceil(bits_per_word);
             let mut words = vec![0usize; word_count];
 
             for src_y in 0..src_side {
@@ -423,7 +422,7 @@ impl GenericTile {
             .map(|k| {
                 let level_side = out_side >> k;
                 let total_bits = level_side * level_side;
-                vec![0usize; (total_bits + bits_per_word - 1) / bits_per_word]
+                vec![0usize; total_bits.div_ceil(bits_per_word)]
             })
             .collect();
 
@@ -450,7 +449,9 @@ impl GenericTile {
                     let out_level_side = out_side >> k;
                     let out_words = &mut out_word_vecs[k];
 
-                    if sub_level_side >= bits_per_word && sub_level_side % bits_per_word == 0 {
+                    if sub_level_side >= bits_per_word
+                        && sub_level_side.is_multiple_of(bits_per_word)
+                    {
                         let src_words = sub_level.as_raw_slice();
                         let src_words_per_row = sub_level_side / bits_per_word;
                         let out_words_per_row = out_level_side / bits_per_word;
@@ -796,7 +797,7 @@ impl GenericTile {
             offset += 8;
 
             // Calculate byte count (round up to nearest byte)
-            let byte_count = (bit_count + 7) / 8;
+            let byte_count = bit_count.div_ceil(8);
             if bytes.len() < offset + byte_count {
                 return Err("Insufficient data for mipmap level".to_string());
             }

@@ -63,6 +63,7 @@ pub struct TilePixelData {
 }
 
 /// Encodes a TileRangeResponse according to this module's wire-format docs.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_tile_range_response(
     root: &GenericTile,
     z: u8,
@@ -156,6 +157,7 @@ pub fn encode_tile_range_response(
 /// Encodes a TileRangeResponse directly from externally provided per-tile pixel coordinates.
 ///
 /// This path lets callers build the response without constructing a `GenericTile` tree.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_tile_range_response_from_tiles(
     z: u8,
     x0: u32,

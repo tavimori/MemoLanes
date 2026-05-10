@@ -69,7 +69,7 @@ pub fn decode_tile_coord_list(
     bytes: &[u8],
     tile_bitmap_exp: u8,
 ) -> Result<Vec<(i64, i64)>, String> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("coordinate list byte length must be divisible by 4".to_string());
     }
 
@@ -119,7 +119,7 @@ pub fn encode_tile_coord_u32(
 }
 
 pub fn decode_tile_coord_u32(bytes: &[u8], tile_bitmap_exp: u8) -> Result<Vec<(i64, i64)>, String> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("u32 index list byte length must be divisible by 4".to_string());
     }
 
@@ -247,7 +247,7 @@ pub fn decode_tile_coord_list_zstd(
 }
 
 pub fn bitmap_bytes_for_exp(exp: u8) -> Result<usize, String> {
-    if exp < 2 || exp > 15 {
+    if !(2..=15).contains(&exp) {
         return Err("bitmap exponent out of supported range [2, 15]".to_string());
     }
     Ok(1usize << (2 * exp as usize - 3))

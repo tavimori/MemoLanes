@@ -1,3 +1,4 @@
+#[allow(dead_code, reason = "wasm specific")]
 pub fn set_panic_hook() {
     #[cfg(target_arch = "wasm32")]
     {
@@ -13,6 +14,7 @@ pub fn set_panic_hook() {
 
 /// Normalize a southwest/northeast bounding box into (x_min, y_min, x_max, y_max),
 /// clamping y to the Mercator range [0, 1].
+#[allow(dead_code, reason = "wasm specific")]
 pub fn normalize_mercator_bounds(
     sw_x: f64,
     sw_y: f64,

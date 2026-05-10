@@ -4,8 +4,7 @@ use bitvec::prelude::*;
 /// There are two common use case for accessing the tiles:
 /// 1. Iterate over the pixels of the tile(subtile) at a given resolution.
 /// 2. Iterate over the pixels as mercator coordinates.
-
-/// IndexIter helps index pixels within a tile with a specific width_exp.
+///    IndexIter helps index pixels within a tile with a specific width_exp.
 pub struct IndexIter {
     x_min: i64,
     x_max: i64,
@@ -72,7 +71,7 @@ impl<'a> Iterator for MipmapIter<'a> {
     type Item = (i64, i64);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((x, y)) = self.index_iter.next() {
+        for (x, y) in self.index_iter.by_ref() {
             if self.bitmap[xy_to_index(x, y, self.width_exp)] {
                 return Some((
                     self.start_x + x - self.x_offset,
@@ -136,9 +135,7 @@ impl<'a> Iterator for OverscanIter<'a> {
                     }
                 }
 
-                if self.sub_tile_index_iter.is_none() {
-                    return None;
-                }
+                self.sub_tile_index_iter.as_ref()?;
             }
 
             if let Some((x, y)) = self.sub_tile_index_iter.as_mut().unwrap().next() {
@@ -151,6 +148,7 @@ impl<'a> Iterator for OverscanIter<'a> {
 }
 
 impl<'a> OverscanIter<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         bitmap: &'a BitVec,
         start_x: i64,
@@ -237,11 +235,12 @@ impl<'a> Iterator for SubtileIter<'a> {
             }
         }
 
-        return None;
+        None
     }
 }
 
 impl<'a> SubtileIter<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sub_tiles: &'a [Option<Box<GenericTile>>],
         start_x: i64,
