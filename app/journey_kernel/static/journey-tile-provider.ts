@@ -362,7 +362,10 @@ export class JourneyTileProvider {
       // Deserialize into a TileBuffer object using the WebAssembly module
       // TODO: remove this number
       const LEVEL0_EXP = 9; // is it reasonable?
-      this.tileBuffer = TileBuffer.new_from_tile_range_response(LEVEL0_EXP, bytes);
+      this.tileBuffer = TileBuffer.new_from_tile_range_response(
+        LEVEL0_EXP,
+        bytes,
+      );
 
       console.log(
         `Tile buffer fetched and deserialized successfully via ${this.multiRequest.getStatus().isFlutterMode ? "Flutter IPC" : "HTTP"}`,
