@@ -27,7 +27,6 @@
 //!   - bitmap bytes (`ceil(bit_count / 8)`)
 //!
 //! The tail may be compressed based on the header `compression` field.
-use crate::pixel_encoding::{bitmap_bytes_for_exp, set_lsb_bit, test_lsb_bit};
 use crate::tile::{xy_to_index, GenericTile};
 use crate::tile_archive::{
     compress_with_len_prefix, decompress_zstd_block, deserialize_mipmap, serialize_mipmap,
@@ -476,4 +475,28 @@ fn validate_leaf_mipmap_levels(
         }
     }
     Ok(())
+}
+
+pub fn bitmap_bytes_for_exp(exp: u8) -> Result<usize, String> {
+    if !(2..=15).contains(&exp) {
+        return Err("bitmap exponent out of supported range [2, 15]".to_string());
+    }
+    Ok(1usize << (2 * exp as usize - 3))
+}
+
+pub(crate) fn set_lsb_bit(bytes: &mut [u8], idx: usize, value: bool) {
+    let byte = idx / 8;
+    let bit = idx % 8;
+    let mask = 1u8 << bit;
+    if value {
+        bytes[byte] |= mask;
+    } else {
+        bytes[byte] &= !mask;
+    }
+}
+
+pub(crate) fn test_lsb_bit(bytes: &[u8], idx: usize) -> bool {
+    let byte = idx / 8;
+    let bit = idx % 8;
+    (bytes[byte] & (1u8 << bit)) != 0
 }

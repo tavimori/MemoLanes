@@ -1,4 +1,3 @@
-pub mod pixel_encoding;
 pub mod tile;
 pub mod tile_archive;
 pub mod tile_iter;
