@@ -156,8 +156,8 @@ export class JourneyCanvasLayer implements JourneyLayer {
 
         // Get pixels coordinates from journeyTileProvider
         const pixelCoords = tileBuffer.get_tile_pixels(
-          BigInt(xNorm),
-          BigInt(y),
+          xNorm,
+          y,
           z,
           bufferSizePower,
         );
