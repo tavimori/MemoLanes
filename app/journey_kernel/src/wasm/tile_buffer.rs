@@ -15,6 +15,10 @@ const PIXEL_CACHE_MAX_ENTRIES: usize = 512;
 
 #[wasm_bindgen]
 /// Decoded tile container built from TileRangeResponse wire-format bytes.
+/// TileBuffer stores a set of tiles, and proxy the queries the requests to the tiles.
+///   TileBuffer allows two groups of queries: 
+///   - get_tile_pixels: get pixel coordinates within a single tile(subtile or tile).
+///   - query_range_mercator_pixels: query pixels within a range of tiles.
 ///
 /// The wire format itself is defined in `crate::tile_range`.
 pub struct TileBuffer {
@@ -43,8 +47,9 @@ impl TileBuffer {
         requested_render_exp.min(max_render_exp)
     }
 
+    #[wasm_bindgen]
     /// Query tile buffer for pixels within a single tile(subtile or tile).
-    fn query_tile_pixels_internal(
+    pub fn get_tile_pixels(
         &self,
         tile_x: u32,
         tile_y: u32,
@@ -62,6 +67,7 @@ impl TileBuffer {
         let mut packed = Vec::new();
 
         if tile_z >= self.tile_grid_exp {
+            // Case 1: The queried tiles are smaller than the TileBuffer's internal tile grid.
             let dz = tile_z - self.tile_grid_exp;
             let parent_x = tile_x >> dz;
             let parent_y = tile_y >> dz;
@@ -92,6 +98,7 @@ impl TileBuffer {
         let base_y = tile_y << span;
 
         if render_exp >= span {
+            // Case 2: The queried tiles are larger than the TileBuffer's internal tile grid.
             let sub_render_exp = render_exp - span;
             for dy in 0..subtiles_per_axis {
                 for dx in 0..subtiles_per_axis {
@@ -116,7 +123,7 @@ impl TileBuffer {
             return packed;
         }
 
-        // Coarse query: requested resolution is below the subtile grid resolution.
+        // Case 3: The requested resolution is below the subtile grid resolution.
         // Reduce each internal tile to occupancy and OR into coarse output pixels.
         let coarse_shift = span - render_exp;
         for dy in 0..subtiles_per_axis {
@@ -169,7 +176,7 @@ impl TileBuffer {
             pixel_type
         );
 
-        let packed_pixels = self.query_tile_pixels_internal(tile_x, tile_y, tile_z, render_exp);
+        let packed_pixels = self.get_tile_pixels(tile_x, tile_y, tile_z, render_exp);
         if packed_pixels.is_empty() {
             return Vec::new();
         }
@@ -321,167 +328,36 @@ impl TileBuffer {
         count
     }
 
-    fn get_bounding_mercator_pixels_internal(
-        &self,
-        sw_x: f64,
-        sw_y: f64,
-        ne_x: f64,
-        ne_y: f64,
-        pixel_type: PixelType,
-    ) -> Vec<f32> {
-        let (merc_x_min, merc_y_min, merc_x_max, merc_y_max) =
-            normalize_mercator_bounds(sw_x, sw_y, ne_x, ne_y);
-
-        let render_exp = self.render_exp.min(self.tile_bitmap_exp);
-        let tile_grid_size = (1u32 << self.tile_grid_exp) as f64;
-        let tile_world_size = 1.0 / tile_grid_size;
-        let tile_pixel_size = tile_world_size / (1u32 << render_exp) as f64;
-
-        let mut pixels = Vec::new();
-        for (tx, ty, tile) in &self.tiles {
-            let merc_x0 = *tx as f64 * tile_world_size;
-            let merc_y0 = *ty as f64 * tile_world_size;
-            let merc_x1 = merc_x0 + tile_world_size;
-            let merc_y1 = merc_y0 + tile_world_size;
-
-            if merc_x1 < merc_x_min
-                || merc_x0 > merc_x_max
-                || merc_y1 < merc_y_min
-                || merc_y0 > merc_y_max
-            {
-                continue;
-            }
-
-            for (px, py) in tile.iter_pixels(0, 0, 0, 0, 0, render_exp as i16) {
-                let merc_x = merc_x0 + px as f64 * tile_pixel_size;
-                let merc_y = merc_y0 + py as f64 * tile_pixel_size;
-                push_mercator_pixel(&mut pixels, pixel_type, merc_x, merc_y, tile_pixel_size);
-            }
-        }
-        pixels
-    }
-
+    /// Split range query into tile queries and merge the results.
     #[wasm_bindgen]
-    pub fn get_bounding_mercator_pixels(
+    pub fn query_range_pixels(
         &self,
-        sw_x: f64,
-        sw_y: f64,
-        ne_x: f64,
-        ne_y: f64,
-    ) -> Vec<f32> {
-        self.get_bounding_mercator_pixels_internal(sw_x, sw_y, ne_x, ne_y, PixelType::Pixel32)
-    }
-
-    #[wasm_bindgen]
-    pub fn get_bounding_mercator_pixels64(
-        &self,
-        sw_x: f64,
-        sw_y: f64,
-        ne_x: f64,
-        ne_y: f64,
-    ) -> Vec<f32> {
-        self.get_bounding_mercator_pixels_internal(sw_x, sw_y, ne_x, ne_y, PixelType::Pixel64)
-    }
-
-    #[wasm_bindgen]
-    pub fn get_bounding_mercator_triangles(
-        &self,
-        sw_x: f64,
-        sw_y: f64,
-        ne_x: f64,
-        ne_y: f64,
-    ) -> Vec<f32> {
-        self.get_bounding_mercator_pixels_internal(sw_x, sw_y, ne_x, ne_y, PixelType::Triangle64)
-    }
-
-    #[wasm_bindgen]
-    pub fn get_tile_pixels(
-        &self,
-        tile_x: i64,
-        tile_y: i64,
-        tile_z: i16,
-        buffer_size_power: i16,
+        x: u32,
+        y: u32,
+        z: u8,
+        w: u32,
+        h: u32,
+        render_exp: u8
     ) -> Vec<u16> {
-        let _ = tile_z;
-        if !(0..=u16::MAX as i64).contains(&tile_x) || !(0..=u16::MAX as i64).contains(&tile_y) {
+        if w == 0 || h == 0 {
             return Vec::new();
         }
-        let tx = tile_x as u16;
-        let ty = tile_y as u16;
-        let Some(tile) = self.find_tile(tx, ty) else {
-            return Vec::new();
-        };
 
-        let mut packed = Vec::new();
-        for (px, py) in tile.iter_pixels(0, 0, 0, 0, 0, buffer_size_power) {
-            if (0..=u16::MAX as i64).contains(&px) && (0..=u16::MAX as i64).contains(&py) {
-                packed.push(px as u16);
-                packed.push(py as u16);
+        let mut out = Vec::new();
+        for dy in 0..h {
+            for dx in 0..w {
+                let Some(tile_x) = x.checked_add(dx) else {
+                    continue;
+                };
+                let Some(tile_y) = y.checked_add(dy) else {
+                    continue;
+                };
+                let tile_pixels = self
+                    .get_tile_pixels(tile_x.into(), tile_y.into(), z.into(), render_exp.into());
+                out.extend_from_slice(&tile_pixels);
             }
         }
-        packed
-    }
-
-    #[wasm_bindgen]
-    pub fn query_tile_pixels(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-        tile_z: u8,
-        render_exp: u8,
-    ) -> Vec<u16> {
-        self.query_tile_pixels_internal(tile_x, tile_y, tile_z, render_exp)
-    }
-
-    #[wasm_bindgen]
-    pub fn query_tile_mercator_pixels(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-        tile_z: u8,
-        render_exp: u8,
-    ) -> Vec<f32> {
-        self.query_tile_mercator_pixels_internal(
-            tile_x,
-            tile_y,
-            tile_z,
-            render_exp,
-            PixelType::Pixel32,
-        )
-    }
-
-    #[wasm_bindgen]
-    pub fn query_tile_mercator_pixels64(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-        tile_z: u8,
-        render_exp: u8,
-    ) -> Vec<f32> {
-        self.query_tile_mercator_pixels_internal(
-            tile_x,
-            tile_y,
-            tile_z,
-            render_exp,
-            PixelType::Pixel64,
-        )
-    }
-
-    #[wasm_bindgen]
-    pub fn query_tile_mercator_triangles(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-        tile_z: u8,
-        render_exp: u8,
-    ) -> Vec<f32> {
-        self.query_tile_mercator_pixels_internal(
-            tile_x,
-            tile_y,
-            tile_z,
-            render_exp,
-            PixelType::Triangle64,
-        )
+        out
     }
 
     #[wasm_bindgen]

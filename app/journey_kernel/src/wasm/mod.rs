@@ -2,13 +2,13 @@ pub mod tile_buffer;
 pub use tile_buffer::{decompress_fta_tile_block, decompress_tile_range_response, TileBuffer};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum PixelType {
+pub enum PixelType {
     Pixel32,
     Pixel64,
     Triangle64,
 }
 
-pub(crate) fn push_mercator_pixel(
+pub fn push_mercator_pixel(
     pixels: &mut Vec<f32>,
     pixel_type: PixelType,
     merc_x: f64,

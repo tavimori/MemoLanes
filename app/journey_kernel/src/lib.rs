@@ -3,7 +3,7 @@ pub mod tile;
 pub mod tile_archive;
 pub mod tile_iter;
 pub mod tile_range;
-mod utils;
+pub mod utils;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;

@@ -228,7 +228,6 @@ impl<'a> Iterator for SubtileIter<'a> {
             }
 
             if let Some((x, y)) = self.current_sub_tile_iter.as_mut().unwrap().next() {
-                // return Some((self.start_x + x, self.start_y + y));
                 return Some((x, y));
             } else {
                 self.current_sub_tile_iter = None;
