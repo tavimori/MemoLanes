@@ -1,3 +1,4 @@
+use crate::tile_iter::{BitmapPixelIter, MipmapIter, OverscanIter};
 use bitvec::prelude::*;
 
 pub fn bitvec_to_bytes_lsb(bits: &BitVec) -> Vec<u8> {
@@ -238,6 +239,163 @@ impl BitMap2D {
         all.extend(self.lods);
         all
     }
+
+    /// Build a full mipmap pyramid from a level-0 bitvec.
+    pub fn build_mipmap_from_level0(width_exp: u8, level0: BitVec) -> Vec<BitVec> {
+        let mut bm = Self::from_bitvec(width_exp, level0);
+        bm.build_lods();
+        bm.into_all_levels()
+    }
+
+    /// Construct from an MSB-ordered packed bitmap payload.
+    ///
+    /// Used by legacy Fog of World / JBM bitmap payloads where bit index 0
+    /// maps to the most-significant bit of byte 0. LODs are built automatically.
+    pub fn from_msb_bitmap(width_exp: u8, data: &[u8]) -> Self {
+        let width: usize = 1 << width_exp;
+        let expected_bytes = (width * width) / 8;
+        assert_eq!(data.len(), expected_bytes, "Data length mismatch");
+
+        let mut bits = BitVec::with_capacity(width * width);
+        bits.resize(width * width, false);
+
+        for (byte_idx, byte) in data.iter().enumerate() {
+            for bit_idx in 0..8 {
+                let pixel_idx = byte_idx * 8 + bit_idx;
+                bits.set(pixel_idx, ((*byte >> (7 - bit_idx)) & 1) == 1);
+            }
+        }
+
+        let mut bm = Self::from_bitvec(width_exp, bits);
+        bm.build_lods();
+        bm
+    }
+
+    /// Iterate pixels at a given (x, y, z, resolution_exp) viewport.
+    ///
+    /// This covers the two leaf-tile iteration cases:
+    /// - Mipmap sampling when `z + resolution_exp <= width_exp`
+    /// - Overscan expansion when the requested resolution exceeds the native data
+    pub fn iter_pixels(
+        &self,
+        start_x: i64,
+        start_y: i64,
+        x: i64,
+        y: i64,
+        z: i16,
+        resolution_exp: i16,
+    ) -> BitmapPixelIter<'_> {
+        let width_exp = self.width_exp as i16;
+
+        if z + resolution_exp <= width_exp {
+            let buffer_exp = z + resolution_exp;
+            let level_offset = (width_exp - resolution_exp - z) as usize;
+            let Some(buffer) = self.level_at_offset(level_offset) else {
+                return BitmapPixelIter::Empty;
+            };
+
+            BitmapPixelIter::MipmapIter(MipmapIter::new(
+                buffer, start_x, start_y, x, y, z, buffer_exp,
+            ))
+        } else if z <= width_exp {
+            BitmapPixelIter::OverscanIter(OverscanIter::new(
+                &self.bits,
+                start_x,
+                start_y,
+                x,
+                y,
+                z,
+                width_exp,
+                z + resolution_exp - width_exp,
+            ))
+        } else {
+            BitmapPixelIter::Empty
+        }
+    }
+
+    /// Extract the mipmap pyramid for a leaf tile at `(x, y, z, resolution_exp)`.
+    ///
+    /// Returns `None` when the extracted region is empty. For a dense bitmap
+    /// this only handles the z == 0 case (direct level slicing or oversampling).
+    /// The z > 0 case returns `None` since a standalone bitmap has no children
+    /// to navigate into.
+    pub fn extract_mipmap(&self, resolution_exp: i16) -> Option<Vec<BitVec>> {
+        let width_exp = self.width_exp as i16;
+
+        if resolution_exp <= width_exp {
+            let level_offset = (width_exp - resolution_exp) as usize;
+            if level_offset >= self.num_levels() {
+                return None;
+            }
+            if self.level_at_offset(level_offset).unwrap().not_any() {
+                return None;
+            }
+            Some(
+                (level_offset..self.num_levels())
+                    .map(|k| self.level_at_offset(k).unwrap().clone())
+                    .collect(),
+            )
+        } else {
+            self.oversample_mipmap(resolution_exp)
+        }
+    }
+
+    /// Build a mipmap at a resolution finer than the native data.
+    /// Each native pixel is expanded to a `2^overscan x 2^overscan` block.
+    fn oversample_mipmap(&self, resolution_exp: i16) -> Option<Vec<BitVec>> {
+        if self.bits.not_any() {
+            return None;
+        }
+
+        let width_exp = self.width_exp as i16;
+        let overscan = (resolution_exp - width_exp) as usize;
+        let src_side = 1usize << width_exp;
+        let mut result = Vec::with_capacity(resolution_exp as usize + 1);
+
+        for k in 0..overscan {
+            let pixel_repeat = 1usize << (overscan - k);
+            let out_side = 1usize << (resolution_exp as usize - k);
+            let bits_per_word = usize::BITS as usize;
+            let word_count = (out_side * out_side).div_ceil(bits_per_word);
+            let mut words = vec![0usize; word_count];
+
+            for src_y in 0..src_side {
+                for src_x in 0..src_side {
+                    if self.bits[src_y * src_side + src_x] {
+                        for dy in 0..pixel_repeat {
+                            let out_y = src_y * pixel_repeat + dy;
+                            for dx in 0..pixel_repeat {
+                                let out_x = src_x * pixel_repeat + dx;
+                                let bit_pos = out_y * out_side + out_x;
+                                words[bit_pos / bits_per_word] |=
+                                    1usize << (bit_pos % bits_per_word);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut bv = BitVec::from_vec(words);
+            bv.truncate(out_side * out_side);
+            result.push(bv);
+        }
+
+        for k in 0..self.num_levels() {
+            result.push(self.level_at_offset(k).unwrap().clone());
+        }
+
+        Some(result)
+    }
+}
+
+pub fn get_bitmap_pixels(
+    bm: &BitMap2D,
+    x: i64,
+    y: i64,
+    z: i16,
+    resolution_exp: i16,
+) -> Vec<(i64, i64)> {
+    bm.iter_pixels(0, 0, x, y, z, resolution_exp).collect()
 }
 
 #[cfg(test)]
@@ -365,31 +523,23 @@ mod tests {
     }
 
     #[test]
-    fn build_lods_matches_tile_build_leaf_mipmap() {
-        use crate::tile::GenericTile;
-
-        // Create a known pattern
+    fn build_lods_matches_build_mipmap_from_level0() {
         let width_exp: u8 = 3; // 8×8
         let mut bits = BitVec::repeat(false, 64);
         bits.set(0, true); // (0,0)
         bits.set(9, true); // (1,1)
         bits.set(63, true); // (7,7)
 
-        // Build via GenericTile
-        let tile_mipmap =
-            GenericTile::build_leaf_mipmap_from_level0(width_exp as i16, bits.clone());
+        let mipmap = BitMap2D::build_mipmap_from_level0(width_exp, bits.clone());
 
-        // Build via BitMap2D
         let mut bm = BitMap2D::from_bitvec(width_exp, bits);
         bm.build_lods();
 
-        // tile_mipmap[0] is the full-res level (same as bm.bits)
-        assert_eq!(&tile_mipmap[0], bm.as_bitvec());
+        assert_eq!(&mipmap[0], bm.as_bitvec());
 
-        // tile_mipmap[1..] should match bm.lod_levels()
-        for (k, tile_level) in tile_mipmap[1..].iter().enumerate() {
+        for (k, level) in mipmap[1..].iter().enumerate() {
             assert_eq!(
-                tile_level,
+                level,
                 bm.lod_level(k).unwrap(),
                 "LOD level {} mismatch",
                 k

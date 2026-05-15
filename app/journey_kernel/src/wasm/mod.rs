@@ -1,5 +1,5 @@
 pub mod tile_buffer;
-pub use tile_buffer::{decompress_fta_tile_block, decompress_tile_range_response, TileBuffer};
+pub use tile_buffer::{decompress_tile_range_response, TileBuffer};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PixelType {

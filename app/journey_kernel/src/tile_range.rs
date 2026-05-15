@@ -27,7 +27,8 @@
 //!   - bitmap bytes (`ceil(bit_count / 8)`)
 //!
 //! The tail may be compressed based on the header `compression` field.
-use crate::tile::{xy_to_index, GenericTile};
+use crate::bitmap2d::BitMap2D;
+use crate::utils::xy_to_index;
 use crate::tile_archive::{
     compress_with_len_prefix, decompress_zstd_block, deserialize_mipmap, serialize_mipmap,
     split_len_prefixed_block, zstd_compress_block, FTA_COMPRESSION_LZ4, FTA_COMPRESSION_NONE,
@@ -59,98 +60,6 @@ pub struct TilePixelData {
     ///
     /// Each `(px, py)` must be in `[0, 2^tile_bitmap_exp)`.
     pub pixels: Vec<(i64, i64)>,
-}
-
-/// Encodes a TileRangeResponse according to this module's wire-format docs.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_tile_range_response(
-    root: &GenericTile,
-    z: u8,
-    x0: u32,
-    y0: u32,
-    w: u32,
-    h: u32,
-    tile_bitmap_exp: u8,
-    compression: u8,
-) -> Result<Vec<u8>, String> {
-    if w == 0 || h == 0 {
-        return Err("Invalid tile range".to_string());
-    }
-    if z > 16 {
-        return Err("z > 16 is not supported by TileRangeResponse (u16 coordinates)".to_string());
-    }
-
-    let x1 = x0
-        .checked_add(w - 1)
-        .ok_or_else(|| "Range width overflow".to_string())?;
-    let y1 = y0
-        .checked_add(h - 1)
-        .ok_or_else(|| "Range height overflow".to_string())?;
-    let range_w = w;
-    let range_h = h;
-    let tile_count = range_w
-        .checked_mul(range_h)
-        .ok_or_else(|| "Range tile_count overflow".to_string())?;
-
-    if x0 > u16::MAX as u32
-        || y0 > u16::MAX as u32
-        || x1 > u16::MAX as u32
-        || y1 > u16::MAX as u32
-        || range_w > u16::MAX as u32
-        || range_h > u16::MAX as u32
-        || tile_count > u16::MAX as u32
-    {
-        return Err("TileRangeResponse only supports u16 tile coordinates and counts".to_string());
-    }
-
-    let _ = bitmap_bytes_for_exp(tile_bitmap_exp)
-        .map_err(|e| format!("Invalid tile_bitmap_exp: {e}"))?;
-    let presence_len = (tile_count as usize).div_ceil(8);
-    let mut presence = vec![0u8; presence_len];
-    let mut payload = Vec::new();
-    let mut present_count = 0u16;
-
-    for dy in 0..range_h {
-        for dx in 0..range_w {
-            let idx = (dy * range_w + dx) as usize;
-            let ox = x0 + dx;
-            let oy = y0 + dy;
-            // `extract_mipmap` returns the full per-tile mipmap pyramid:
-            // level 0 is the leaf bitmap (highest resolution), and each next level
-            // is a 2x downsampled occupancy bitmap. `serialize_mipmap` writes all
-            // levels for this tile as one blob [level_count][bit_count+bytes]...
-            // and blobs are concatenated in row-major tile order in `payload`.
-            if let Some(levels) =
-                root.extract_mipmap(ox as i64, oy as i64, z as i16, tile_bitmap_exp as i16)
-            {
-                set_lsb_bit(&mut presence, idx, true);
-                payload.extend_from_slice(&serialize_mipmap(&levels));
-                present_count = present_count
-                    .checked_add(1)
-                    .ok_or_else(|| "present_count overflow".to_string())?;
-            }
-        }
-    }
-
-    let mut raw_tail = Vec::with_capacity(presence.len() + payload.len());
-    raw_tail.extend_from_slice(&presence);
-    raw_tail.extend_from_slice(&payload);
-    let encoded_tail = compress_tile_range_tail(&raw_tail, compression)
-        .map_err(|e| format!("Failed to encode TileRangeResponse tail: {e}"))?;
-
-    let mut out = Vec::with_capacity(16 + encoded_tail.len());
-    out.push(tile_bitmap_exp);
-    out.push(z);
-    out.extend_from_slice(&(x0 as u16).to_le_bytes());
-    out.extend_from_slice(&(y0 as u16).to_le_bytes());
-    out.extend_from_slice(&(range_w as u16).to_le_bytes());
-    out.extend_from_slice(&(range_h as u16).to_le_bytes());
-    out.extend_from_slice(&(tile_count as u16).to_le_bytes());
-    out.extend_from_slice(&present_count.to_le_bytes());
-    out.push(compression);
-    out.push(0);
-    out.extend_from_slice(&encoded_tail);
-    Ok(out)
 }
 
 /// Encodes a TileRangeResponse directly from externally provided per-tile pixel coordinates.
@@ -242,7 +151,9 @@ pub fn encode_tile_range_response_from_tiles(
         if level0.not_any() {
             continue;
         }
-        let levels = GenericTile::build_leaf_mipmap_from_level0(tile_bitmap_exp as i16, level0);
+        let mut bm = BitMap2D::from_bitvec(tile_bitmap_exp, level0);
+        bm.build_lods();
+        let levels = bm.into_all_levels();
         tile_blobs[idx] = Some(serialize_mipmap(&levels));
     }
 
@@ -331,7 +242,7 @@ pub fn parse_tiles_from_body(
     tile_count: usize,
     present_count: usize,
     body: &[u8],
-) -> Result<Vec<(u16, u16, GenericTile)>, String> {
+) -> Result<Vec<(u16, u16, BitMap2D)>, String> {
     let presence_len = tile_count.div_ceil(8);
     if body.len() < presence_len {
         return Err("TileRangeResponse body too small for presence bitmap".to_string());
@@ -352,10 +263,12 @@ pub fn parse_tiles_from_body(
             let levels = deserialize_mipmap(blob)?;
             validate_leaf_mipmap_levels(tile_bitmap_exp, &levels)?;
             offset += blob_len;
-            let tile = GenericTile::from_precomputed_mipmap(tile_bitmap_exp as i16, levels);
+            let base = levels[0].clone();
+            let lods = levels[1..].to_vec();
+            let bitmap = BitMap2D::from_precomputed(tile_bitmap_exp, base, lods);
             let x = x_origin + (idx % range_w) as u16;
             let y = y_origin + (idx / range_w) as u16;
-            out.push((x, y, tile));
+            out.push((x, y, bitmap));
             seen_present += 1;
         }
     }
@@ -369,7 +282,7 @@ pub fn parse_tiles_from_body(
     Ok(out)
 }
 
-pub fn decode_tile_range_response(data: &[u8]) -> Result<Vec<(u16, u16, GenericTile)>, String> {
+pub fn decode_tile_range_response(data: &[u8]) -> Result<Vec<(u16, u16, BitMap2D)>, String> {
     let decompressed = decompress_tile_range_response(data)?;
     let header = parse_tile_range_header(&decompressed)?;
     let body = decompressed
@@ -484,7 +397,7 @@ pub fn bitmap_bytes_for_exp(exp: u8) -> Result<usize, String> {
     Ok(1usize << (2 * exp as usize - 3))
 }
 
-pub(crate) fn set_lsb_bit(bytes: &mut [u8], idx: usize, value: bool) {
+pub fn set_lsb_bit(bytes: &mut [u8], idx: usize, value: bool) {
     let byte = idx / 8;
     let bit = idx % 8;
     let mask = 1u8 << bit;

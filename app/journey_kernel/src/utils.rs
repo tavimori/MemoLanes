@@ -1,3 +1,14 @@
+pub fn xy_to_index(x: i64, y: i64, width_exp: i16) -> usize {
+    (x + y * (1 << width_exp)) as usize
+}
+
+pub fn index_to_xy(index: usize, width_exp: i16) -> (i64, i64) {
+    (
+        index as i64 % (1 << width_exp),
+        index as i64 / (1 << width_exp),
+    )
+}
+
 #[allow(dead_code, reason = "wasm specific")]
 pub fn set_panic_hook() {
     #[cfg(target_arch = "wasm32")]

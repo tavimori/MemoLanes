@@ -1,11 +1,10 @@
 use super::{push_mercator_pixel, PixelType};
-use crate::tile::GenericTile;
-use crate::tile_archive::decompress_tile_block;
+use crate::bitmap2d::BitMap2D;
 use crate::tile_range::{
     decompress_tile_range_response as core_decompress_tile_range_response, parse_tile_range_header,
     parse_tiles_from_body,
 };
-use crate::utils::{normalize_mercator_bounds, set_panic_hook};
+use crate::utils::set_panic_hook;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -22,7 +21,7 @@ const PIXEL_CACHE_MAX_ENTRIES: usize = 512;
 ///
 /// The wire format itself is defined in `crate::tile_range`.
 pub struct TileBuffer {
-    pub(crate) tiles: Vec<(u16, u16, GenericTile)>,
+    pub(crate) tiles: Vec<(u16, u16, BitMap2D)>,
     pub(crate) _level0_exp: u8,
     pub(crate) tile_grid_exp: u8,
     pub(crate) tile_bitmap_exp: u8,
@@ -34,11 +33,11 @@ pub struct TileBuffer {
 
 #[wasm_bindgen]
 impl TileBuffer {
-    fn find_tile(&self, grid_x: u16, grid_y: u16) -> Option<&GenericTile> {
+    fn find_tile(&self, grid_x: u16, grid_y: u16) -> Option<&BitMap2D> {
         self.tiles
             .iter()
             .find(|(x, y, _)| *x == grid_x && *y == grid_y)
-            .map(|(_, _, tile)| tile)
+            .map(|(_, _, bm)| bm)
     }
 
     fn clamped_query_render_exp(&self, tile_z: u8, requested_render_exp: u8) -> u8 {
@@ -136,7 +135,7 @@ impl TileBuffer {
                 let Some(tile) = self.find_tile(gx as u16, gy as u16) else {
                     continue;
                 };
-                if tile.iter_pixels(0, 0, 0, 0, 0, 0).next().is_none() {
+                if tile.is_empty() {
                     continue;
                 }
                 let out_x = dx >> coarse_shift;
@@ -293,26 +292,6 @@ impl TileBuffer {
     }
 
     #[wasm_bindgen]
-    pub fn add_tile(
-        &mut self,
-        x: u16,
-        y: u16,
-        tile_bitmap_exp: u8,
-        decompressed_block: &[u8],
-    ) -> Result<(), JsValue> {
-        if self.tile_bitmap_exp != tile_bitmap_exp {
-            return Err(JsValue::from_str(
-                "tile_bitmap_exp mismatch when adding tile to TileBuffer",
-            ));
-        }
-        let tile = GenericTile::from_bytes(decompressed_block)
-            .map_err(|e| JsValue::from_str(&format!("Failed to parse decompressed tile: {e}")))?;
-        self.tiles.push((x, y, tile));
-        self.mercator_cache.borrow_mut().clear();
-        Ok(())
-    }
-
-    #[wasm_bindgen]
     pub fn clear_cache(&self) {
         self.mercator_cache.borrow_mut().clear();
     }
@@ -320,8 +299,8 @@ impl TileBuffer {
     #[wasm_bindgen]
     pub fn total_pixel_count(&self) -> u32 {
         let mut count = 0u32;
-        for (_, _, tile) in &self.tiles {
-            count += tile
+        for (_, _, bm) in &self.tiles {
+            count += bm
                 .iter_pixels(0, 0, 0, 0, 0, self.tile_bitmap_exp as i16)
                 .count() as u32;
         }
@@ -404,10 +383,4 @@ impl TileBuffer {
 pub fn decompress_tile_range_response(data: &[u8]) -> Result<Vec<u8>, JsValue> {
     core_decompress_tile_range_response(data)
         .map_err(|e| JsValue::from_str(&format!("Failed to decompress TileRangeResponse: {e}")))
-}
-
-#[wasm_bindgen]
-pub fn decompress_fta_tile_block(compression: u8, data: &[u8]) -> Result<Vec<u8>, JsValue> {
-    decompress_tile_block(compression, data)
-        .map_err(|e| JsValue::from_str(&format!("Failed to decompress tile block: {e}")))
 }
