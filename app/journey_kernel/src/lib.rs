@@ -1,3 +1,4 @@
+pub mod bitmap2d;
 pub mod tile;
 pub mod tile_archive;
 pub mod tile_iter;

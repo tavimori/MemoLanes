@@ -13,7 +13,7 @@ use ruzstd::encoding::{compress_to_vec as ruzstd_compress_to_vec, CompressionLev
 #[cfg(target_arch = "wasm32")]
 use std::io::Read;
 
-use crate::tile::{bitvec_from_bytes_lsb, bitvec_to_bytes_lsb};
+use crate::bitmap2d::{bitvec_from_bytes_lsb, bitvec_to_bytes_lsb};
 
 pub const FTA_COMPRESSION_NONE: u8 = 0;
 pub const FTA_COMPRESSION_LZ4: u8 = 1;

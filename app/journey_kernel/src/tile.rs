@@ -1,10 +1,11 @@
+use crate::bitmap2d::{bitvec_from_bytes_lsb, bitvec_to_bytes_lsb, BitMap2D};
 use crate::tile_iter::{MipmapIter, OverscanIter, SubtileIter, TilePixelIter};
 use bitvec::prelude::*;
 
 #[derive(Clone)]
 pub struct GenericTile {
     sub_tiles: Vec<Option<Box<GenericTile>>>,
-    mipmap: Vec<BitVec>,
+    bitmap: Option<BitMap2D>,
     width_exp: i16,
     is_leaf: bool,
 }
@@ -27,62 +28,14 @@ pub fn index_to_xy(index: usize, width_exp: i16) -> (i64, i64) {
     )
 }
 
-pub(crate) fn bitvec_to_bytes_lsb(bits: &BitVec) -> Vec<u8> {
-    let byte_count = bits.len().div_ceil(8);
-    let raw_words = bits.as_raw_slice();
-    let mut out = Vec::with_capacity(std::mem::size_of_val(raw_words));
-    for &word in raw_words {
-        out.extend_from_slice(&word.to_le_bytes());
-    }
-    out.truncate(byte_count);
-    out
-}
-
-pub(crate) fn bitvec_from_bytes_lsb(bytes: &[u8], bit_count: usize) -> BitVec {
-    let byte_count = bit_count.div_ceil(8);
-    assert!(
-        bytes.len() >= byte_count,
-        "insufficient bytes for bit_count: need {}, got {}",
-        byte_count,
-        bytes.len()
-    );
-    #[cfg(target_endian = "little")]
-    {
-        let bytes_per_word = core::mem::size_of::<usize>();
-        let mut words = vec![0usize; byte_count.div_ceil(bytes_per_word)];
-        for (i, b) in bytes[..byte_count].iter().enumerate() {
-            let word_idx = i / bytes_per_word;
-            let shift = (i % bytes_per_word) * 8;
-            words[word_idx] |= (*b as usize) << shift;
-        }
-        let mut bitvec = BitVec::from_vec(words);
-        bitvec.truncate(bit_count);
-        bitvec
-    }
-
-    #[cfg(not(target_endian = "little"))]
-    {
-        // Fallback for non-little-endian architectures.
-        let mut bitvec = BitVec::with_capacity(bit_count);
-        bitvec.resize(bit_count, false);
-        for i in 0..bit_count {
-            let byte_idx = i / 8;
-            let bit_idx = i % 8;
-            let bit_value = (bytes[byte_idx] >> bit_idx) & 1;
-            bitvec.set(i, bit_value != 0);
-        }
-        bitvec
-    }
-}
 
 impl GenericTile {
     pub fn new(width_exp: i16) -> Self {
         let sub_tiles = vec![None; 1 << (width_exp * 2)];
-        let mipmap = vec![];
 
         Self {
             sub_tiles,
-            mipmap,
+            bitmap: None,
             width_exp,
             is_leaf: false,
         }
@@ -96,12 +49,24 @@ impl GenericTile {
         self.width_exp
     }
 
-    pub fn mipmap_levels(&self) -> &[BitVec] {
-        &self.mipmap
+    pub fn mipmap_levels(&self) -> Vec<BitVec> {
+        match &self.bitmap {
+            Some(bm) => (0..bm.num_levels())
+                .map(|k| bm.level_at_offset(k).unwrap().clone())
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     pub fn set_mipmap(&mut self, mipmap: Vec<BitVec>) {
-        self.mipmap = mipmap;
+        if mipmap.is_empty() {
+            self.bitmap = None;
+            return;
+        }
+        let base = mipmap[0].clone();
+        let width_exp = (base.len() as f64).sqrt().log2() as u8;
+        let lods = mipmap[1..].to_vec();
+        self.bitmap = Some(BitMap2D::from_precomputed(width_exp, base, lods));
     }
 
     pub fn has_sub_tile(&self, x: i64, y: i64) -> bool {
@@ -126,9 +91,12 @@ impl GenericTile {
     }
 
     fn mipmap_has_subtile(&self, idx: usize) -> bool {
-        self.mipmap
-            .first()
-            .map(|level| idx < level.len() && level[idx])
+        self.bitmap
+            .as_ref()
+            .map(|bm| {
+                let bits = bm.as_bitvec();
+                idx < bits.len() && bits[idx]
+            })
             .unwrap_or(false)
     }
 
@@ -216,64 +184,43 @@ impl GenericTile {
     /// This is used by legacy Fog of World/JBM bitmap payloads where bit
     /// index 0 maps to the most-significant bit of byte 0.
     pub fn from_msb_bitmap(width_exp: i16, data: &[u8]) -> Self {
-        let width: i64 = 1 << width_exp;
+        let width: usize = 1 << width_exp;
         let expected_bytes = (width * width) / 8;
-        assert_eq!(data.len(), expected_bytes as usize, "Data length mismatch");
+        assert_eq!(data.len(), expected_bytes, "Data length mismatch");
 
-        let mut tile = Self {
-            sub_tiles: vec![],
-            mipmap: vec![],
-            width_exp,
-            is_leaf: true,
-        };
-
-        let mut initial_level = BitVec::with_capacity((width * width) as usize);
-        initial_level.resize((width * width) as usize, false);
+        let mut bits = BitVec::with_capacity(width * width);
+        bits.resize(width * width, false);
 
         for (byte_idx, byte) in data.iter().enumerate() {
             for bit_idx in 0..8 {
                 let pixel_idx = byte_idx * 8 + bit_idx;
-                initial_level.set(pixel_idx, ((*byte >> (7 - bit_idx)) & 1) == 1);
+                bits.set(pixel_idx, ((*byte >> (7 - bit_idx)) & 1) == 1);
             }
         }
 
-        tile.mipmap.push(initial_level);
+        let mut bm = BitMap2D::from_bitvec(width_exp as u8, bits);
+        bm.build_lods();
 
-        let mut current_size = width;
-        while current_size > 1 {
-            current_size /= 2;
-            let previous_level = tile.mipmap.last().unwrap();
-            let mut new_level = BitVec::with_capacity((current_size * current_size) as usize);
-            new_level.resize((current_size * current_size) as usize, false);
-
-            for i in 0..current_size {
-                for j in 0..current_size {
-                    let new_idx = xy_to_index(j, i, current_size.trailing_zeros() as i16);
-                    let prev_i = i * 2;
-                    let prev_j = j * 2;
-                    let prev_width_exp = (current_size * 2).trailing_zeros() as i16;
-
-                    new_level.set(
-                        new_idx,
-                        previous_level[xy_to_index(prev_j, prev_i, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j + 1, prev_i, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j, prev_i + 1, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j + 1, prev_i + 1, prev_width_exp)],
-                    );
-                }
-            }
-
-            tile.mipmap.push(new_level);
+        Self {
+            sub_tiles: vec![],
+            bitmap: Some(bm),
+            width_exp,
+            is_leaf: true,
         }
-
-        tile
     }
 
     /// Construct a leaf tile from precomputed mipmap levels.
     pub fn from_precomputed_mipmap(width_exp: i16, mipmap: Vec<BitVec>) -> Self {
+        let bitmap = if mipmap.is_empty() {
+            None
+        } else {
+            let base = mipmap[0].clone();
+            let lods = mipmap[1..].to_vec();
+            Some(BitMap2D::from_precomputed(width_exp as u8, base, lods))
+        };
         Self {
             sub_tiles: vec![],
-            mipmap,
+            bitmap,
             width_exp,
             is_leaf: true,
         }
@@ -313,14 +260,22 @@ impl GenericTile {
         // Case 2: Leaf tile — reuse existing mipmap levels directly
         if self.is_leaf && z == 0 {
             if resolution_exp <= self.width_exp {
+                let bm = match &self.bitmap {
+                    Some(bm) => bm,
+                    None => return None,
+                };
                 let level_offset = (self.width_exp - resolution_exp) as usize;
-                if level_offset >= self.mipmap.len() {
+                if level_offset >= bm.num_levels() {
                     return None;
                 }
-                if self.mipmap[level_offset].not_any() {
+                if bm.level_at_offset(level_offset).unwrap().not_any() {
                     return None;
                 }
-                return Some(self.mipmap[level_offset..].to_vec());
+                return Some(
+                    (level_offset..bm.num_levels())
+                        .map(|k| bm.level_at_offset(k).unwrap().clone())
+                        .collect(),
+                );
             }
             // resolution_exp > width_exp: oversample leaf data
             return self.oversample_leaf_mipmap(resolution_exp);
@@ -356,12 +311,13 @@ impl GenericTile {
     /// Build a mipmap for a leaf tile at a resolution finer than its native data.
     /// Each native pixel is expanded to a `2^overscan × 2^overscan` block.
     fn oversample_leaf_mipmap(&self, resolution_exp: i16) -> Option<Vec<BitVec>> {
-        let overscan = (resolution_exp - self.width_exp) as usize;
-        let src_level0 = self.mipmap.first()?;
+        let bm = self.bitmap.as_ref()?;
+        let src_level0 = bm.as_bitvec();
         if src_level0.not_any() {
             return None;
         }
 
+        let overscan = (resolution_exp - self.width_exp) as usize;
         let src_side = 1usize << self.width_exp;
         let mut result = Vec::with_capacity(resolution_exp as usize + 1);
 
@@ -393,8 +349,8 @@ impl GenericTile {
             result.push(bv);
         }
 
-        for level in &self.mipmap {
-            result.push(level.clone());
+        for k in 0..bm.num_levels() {
+            result.push(bm.level_at_offset(k).unwrap().clone());
         }
 
         Some(result)
@@ -498,29 +454,14 @@ impl GenericTile {
             .collect();
 
         // Build remaining pyramid levels beyond the composited ones
-        let last_side = out_side >> (num_sub_levels - 1);
-        let mut current_side = last_side;
-        while current_side > 1 {
-            current_side /= 2;
-            let previous_level = out_mipmap.last().unwrap();
-            let current_width_exp = current_side.trailing_zeros() as i16;
-            let prev_width_exp = (current_side * 2).trailing_zeros() as i16;
-            let mut new_level = BitVec::repeat(false, current_side * current_side);
-            for i in 0..(current_side as i64) {
-                for j in 0..(current_side as i64) {
-                    let new_idx = xy_to_index(j, i, current_width_exp);
-                    let prev_i = i * 2;
-                    let prev_j = j * 2;
-                    new_level.set(
-                        new_idx,
-                        previous_level[xy_to_index(prev_j, prev_i, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j + 1, prev_i, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j, prev_i + 1, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j + 1, prev_i + 1, prev_width_exp)],
-                    );
-                }
+        let last_level = out_mipmap.last().unwrap().clone();
+        let last_exp = (out_side >> (num_sub_levels - 1)).trailing_zeros() as u8;
+        if last_exp > 0 {
+            let mut tail_bm = BitMap2D::from_bitvec(last_exp, last_level);
+            tail_bm.build_lods();
+            for lod in tail_bm.lod_levels() {
+                out_mipmap.push(lod.clone());
             }
-            out_mipmap.push(new_level);
         }
 
         Some(out_mipmap)
@@ -550,13 +491,9 @@ impl GenericTile {
         }
 
         if z + resolution_exp <= self.width_exp {
-            // iterate the indices with value==true in the mipmap
-
-            // eg. z = 1, resolution_exp = 2, then I want the 8x8 buffer, so that a quarter is 4x4, which has resolution_exp = 2
             let buffer_exp = z + resolution_exp;
-
-            // find the correct scale
-            let buffer = &self.mipmap[(self.width_exp - resolution_exp - z) as usize];
+            let level_offset = (self.width_exp - resolution_exp - z) as usize;
+            let buffer = self.bitmap.as_ref().unwrap().level_at_offset(level_offset).unwrap();
 
             debug_assert_eq!(buffer.len(), 1 << (2 * (z + resolution_exp)));
 
@@ -564,11 +501,9 @@ impl GenericTile {
                 buffer, start_x, start_y, x, y, z, buffer_exp,
             ))
         } else if z <= self.width_exp {
-            // the tile of interest is still larger than or equal to a sub tile
-
             if self.is_leaf {
                 TilePixelIter::OverscanIter(OverscanIter::new(
-                    &self.mipmap[0],
+                    self.bitmap.as_ref().unwrap().as_bitvec(),
                     start_x,
                     start_y,
                     x,
@@ -614,92 +549,24 @@ impl GenericTile {
     }
 
     pub fn compute_mipmap(&mut self) {
-        let mut mipmap = vec![];
-        let width = 1 << self.width_exp;
-
-        // Create initial level as BitVec
-        let mut initial_level = BitVec::with_capacity(width * width);
-        initial_level.resize(width * width, false);
-
+        let mut bm = BitMap2D::new(self.width_exp as u8);
+        let width = 1usize << self.width_exp;
         for i in 0..width {
             for j in 0..width {
-                let idx = xy_to_index(j as i64, i as i64, self.width_exp);
-                initial_level.set(idx, self.sub_tiles[idx].is_some());
-            }
-        }
-
-        mipmap.push(initial_level);
-
-        let mut current_size = 1 << self.width_exp;
-
-        while current_size > 1 {
-            current_size /= 2;
-            let previous_level = mipmap.last().unwrap();
-            let mut new_level = BitVec::with_capacity(current_size * current_size);
-            new_level.resize(current_size * current_size, false);
-            let current_width_exp = current_size.trailing_zeros() as i16;
-
-            for i in 0..current_size {
-                for j in 0..current_size {
-                    let new_idx = xy_to_index(j as i64, i as i64, current_width_exp);
-                    let prev_i = i * 2;
-                    let prev_j = j * 2;
-                    let prev_width_exp = (current_size * 2).trailing_zeros() as i16;
-
-                    new_level.set(
-                        new_idx,
-                        previous_level[xy_to_index(prev_j as i64, prev_i as i64, prev_width_exp)]
-                            || previous_level
-                                [xy_to_index((prev_j + 1) as i64, prev_i as i64, prev_width_exp)]
-                            || previous_level
-                                [xy_to_index(prev_j as i64, (prev_i + 1) as i64, prev_width_exp)]
-                            || previous_level[xy_to_index(
-                                (prev_j + 1) as i64,
-                                (prev_i + 1) as i64,
-                                prev_width_exp,
-                            )],
-                    );
+                let idx = i * width + j;
+                if self.sub_tiles[idx].is_some() {
+                    bm.set(j, i, true);
                 }
             }
-
-            mipmap.push(new_level);
         }
-
-        // print each level mipmap size
-        // for level in &mipmap {
-        //     println!("level size: {}", level.len());
-        // }
-
-        self.mipmap = mipmap;
+        bm.build_lods();
+        self.bitmap = Some(bm);
     }
 
     pub(crate) fn build_leaf_mipmap_from_level0(width_exp: i16, level0: BitVec) -> Vec<BitVec> {
-        let mut mipmap = vec![level0];
-        let mut current_size = 1i64 << width_exp;
-        while current_size > 1 {
-            current_size /= 2;
-            let previous_level = mipmap.last().expect("mipmap has level 0");
-            let mut new_level = BitVec::with_capacity((current_size * current_size) as usize);
-            new_level.resize((current_size * current_size) as usize, false);
-            let current_width_exp = current_size.trailing_zeros() as i16;
-            let prev_width_exp = (current_size * 2).trailing_zeros() as i16;
-            for i in 0..current_size {
-                for j in 0..current_size {
-                    let new_idx = xy_to_index(j, i, current_width_exp);
-                    let prev_i = i * 2;
-                    let prev_j = j * 2;
-                    new_level.set(
-                        new_idx,
-                        previous_level[xy_to_index(prev_j, prev_i, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j + 1, prev_i, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j, prev_i + 1, prev_width_exp)]
-                            || previous_level[xy_to_index(prev_j + 1, prev_i + 1, prev_width_exp)],
-                    );
-                }
-            }
-            mipmap.push(new_level);
-        }
-        mipmap
+        let mut bm = BitMap2D::from_bitvec(width_exp as u8, level0);
+        bm.build_lods();
+        bm.into_all_levels()
     }
 
     /// Serialize the tile to bytes
@@ -717,32 +584,29 @@ impl GenericTile {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        // Write width_exp
         bytes.extend_from_slice(&self.width_exp.to_le_bytes());
-
-        // Write is_leaf
         bytes.push(if self.is_leaf { 1 } else { 0 });
 
-        // Write mipmap data
-        bytes.extend_from_slice(&(self.mipmap.len() as u32).to_le_bytes());
-        for mipmap_level in &self.mipmap {
-            let bit_count = mipmap_level.len() as u64;
-            bytes.extend_from_slice(&bit_count.to_le_bytes());
-
-            bytes.extend_from_slice(&bitvec_to_bytes_lsb(mipmap_level));
+        let num_levels = self.bitmap.as_ref().map_or(0, |bm| bm.num_levels());
+        bytes.extend_from_slice(&(num_levels as u32).to_le_bytes());
+        if let Some(bm) = &self.bitmap {
+            for k in 0..bm.num_levels() {
+                let level = bm.level_at_offset(k).unwrap();
+                let bit_count = level.len() as u64;
+                bytes.extend_from_slice(&bit_count.to_le_bytes());
+                bytes.extend_from_slice(&bitvec_to_bytes_lsb(level));
+            }
         }
 
-        // Write sub_tiles
         bytes.extend_from_slice(&(self.sub_tiles.len() as u32).to_le_bytes());
         for sub_tile_opt in &self.sub_tiles {
             if let Some(sub_tile) = sub_tile_opt {
-                bytes.push(1); // exists
+                bytes.push(1);
                 let sub_tile_bytes = sub_tile.to_bytes();
-                // Write length of sub_tile data first
                 bytes.extend_from_slice(&(sub_tile_bytes.len() as u32).to_le_bytes());
                 bytes.extend_from_slice(&sub_tile_bytes);
             } else {
-                bytes.push(0); // does not exist
+                bytes.push(0);
             }
         }
 
@@ -753,21 +617,18 @@ impl GenericTile {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut offset = 0;
 
-        // Read width_exp
         if bytes.len() < offset + 2 {
             return Err("Insufficient data for width_exp".to_string());
         }
         let width_exp = i16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
         offset += 2;
 
-        // Read is_leaf
         if bytes.len() < offset + 1 {
             return Err("Insufficient data for is_leaf".to_string());
         }
         let is_leaf = bytes[offset] != 0;
         offset += 1;
 
-        // Read mipmap data
         if bytes.len() < offset + 4 {
             return Err("Insufficient data for mipmap_count".to_string());
         }
@@ -779,7 +640,7 @@ impl GenericTile {
         ]) as usize;
         offset += 4;
 
-        let mut mipmap = Vec::with_capacity(mipmap_count);
+        let mut levels = Vec::with_capacity(mipmap_count);
         for _ in 0..mipmap_count {
             if bytes.len() < offset + 8 {
                 return Err("Insufficient data for bit_count".to_string());
@@ -796,19 +657,18 @@ impl GenericTile {
             ]) as usize;
             offset += 8;
 
-            // Calculate byte count (round up to nearest byte)
             let byte_count = bit_count.div_ceil(8);
             if bytes.len() < offset + byte_count {
                 return Err("Insufficient data for mipmap level".to_string());
             }
 
-            let bitvec = bitvec_from_bytes_lsb(&bytes[offset..offset + byte_count], bit_count);
-
-            mipmap.push(bitvec);
+            levels.push(bitvec_from_bytes_lsb(
+                &bytes[offset..offset + byte_count],
+                bit_count,
+            ));
             offset += byte_count;
         }
 
-        // Read sub_tiles
         if bytes.len() < offset + 4 {
             return Err("Insufficient data for sub_tiles_count".to_string());
         }
@@ -851,9 +711,16 @@ impl GenericTile {
             }
         }
 
+        let bitmap = if levels.is_empty() {
+            None
+        } else {
+            let base = levels.remove(0);
+            Some(BitMap2D::from_precomputed(width_exp as u8, base, levels))
+        };
+
         Ok(Self {
             sub_tiles,
-            mipmap,
+            bitmap,
             width_exp,
             is_leaf,
         })
