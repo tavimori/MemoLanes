@@ -140,8 +140,8 @@ fn tile_range_response_from_journey_bitmap(
         ));
     }
 
-    if !(0..=25).contains(&z) {
-        return Err(format!("Invalid zoom level: {z} (must be 0-25)"));
+    if !(0..=16).contains(&z) {
+        return Err(format!("Invalid zoom level: {z} (must be 0-16)"));
     }
 
     if !(6..=11).contains(&buffer_size_power) {
