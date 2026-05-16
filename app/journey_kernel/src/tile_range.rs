@@ -28,12 +28,12 @@
 //!
 //! The tail may be compressed based on the header `compression` field.
 use crate::bitmap2d::BitMap2D;
-use crate::utils::xy_to_index;
 use crate::tile_archive::{
     compress_with_len_prefix, decompress_zstd_block, deserialize_mipmap, serialize_mipmap,
     split_len_prefixed_block, zstd_compress_block, FTA_COMPRESSION_LZ4, FTA_COMPRESSION_NONE,
     FTA_COMPRESSION_ZSTD,
 };
+use crate::utils::xy_to_index;
 use bitvec::prelude::BitVec;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 

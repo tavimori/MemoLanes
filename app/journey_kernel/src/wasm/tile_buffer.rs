@@ -12,7 +12,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 /// Decoded tile container built from TileRangeResponse wire-format bytes.
 /// TileBuffer stores a set of tiles, and proxy the queries the requests to the tiles.
-///   TileBuffer allows two groups of queries: 
+///   TileBuffer allows two groups of queries:
 ///   - get_tile_pixels: get pixel coordinates within a single tile(subtile or tile).
 ///   - query_range_mercator_pixels: query pixels within a range of tiles.
 ///
@@ -234,7 +234,7 @@ impl TileBuffer {
         z: u8,
         w: u32,
         h: u32,
-        render_exp: u8
+        render_exp: u8,
     ) -> Vec<u16> {
         if w == 0 || h == 0 {
             return Vec::new();
@@ -249,14 +249,13 @@ impl TileBuffer {
                 let Some(tile_y) = y.checked_add(dy) else {
                     continue;
                 };
-                let tile_pixels = self
-                    .get_tile_pixels(tile_x.into(), tile_y.into(), z.into(), render_exp.into());
+                let tile_pixels =
+                    self.get_tile_pixels(tile_x.into(), tile_y.into(), z.into(), render_exp.into());
                 out.extend_from_slice(&tile_pixels);
             }
         }
         out
     }
-
 }
 
 #[wasm_bindgen]

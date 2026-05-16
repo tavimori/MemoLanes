@@ -538,12 +538,7 @@ mod tests {
         assert_eq!(&mipmap[0], bm.as_bitvec());
 
         for (k, level) in mipmap[1..].iter().enumerate() {
-            assert_eq!(
-                level,
-                bm.lod_level(k).unwrap(),
-                "LOD level {} mismatch",
-                k
-            );
+            assert_eq!(level, bm.lod_level(k).unwrap(), "LOD level {} mismatch", k);
         }
     }
 
