@@ -1,4 +1,4 @@
-use super::{push_mercator_pixel, PixelType};
+use super::PixelType;
 use crate::bitmap2d::BitMap2D;
 use crate::tile_range::{
     decompress_tile_range_response as core_decompress_tile_range_response, parse_tile_range_header,
@@ -9,9 +9,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
-// TODO: in later implementation, consider make cache in js side for better webgl integration.
-const PIXEL_CACHE_MAX_ENTRIES: usize = 512;
-
 #[wasm_bindgen]
 /// Decoded tile container built from TileRangeResponse wire-format bytes.
 /// TileBuffer stores a set of tiles, and proxy the queries the requests to the tiles.
@@ -21,26 +18,34 @@ const PIXEL_CACHE_MAX_ENTRIES: usize = 512;
 ///
 /// The wire format itself is defined in `crate::tile_range`.
 pub struct TileBuffer {
-    pub(crate) tiles: Vec<(u16, u16, BitMap2D)>,
+    pub(crate) grid_origin_x: u16,
+    pub(crate) grid_origin_y: u16,
+    pub(crate) grid_w: u16,
+    pub(crate) grid_h: u16,
+    /// Row-major grid: index = (y - grid_origin_y) * grid_w + (x - grid_origin_x).
+    /// Absent tiles are `None`.
+    pub(crate) tiles: Vec<Option<BitMap2D>>,
     pub(crate) _level0_exp: u8,
     pub(crate) tile_grid_exp: u8,
     pub(crate) tile_bitmap_exp: u8,
     pub(crate) render_exp: u8,
     /// Cache of mercator pixel output keyed by (tile_x, tile_y, tile_z, render_exp, pixel_type).
     /// Uses RefCell for interior mutability since wasm_bindgen query methods take &self.
-    mercator_cache: RefCell<HashMap<(u32, u32, u8, u8, PixelType), Vec<f32>>>,
+    pub(crate) mercator_cache: RefCell<HashMap<(u32, u32, u8, u8, PixelType), Vec<f32>>>,
 }
 
 #[wasm_bindgen]
 impl TileBuffer {
-    fn find_tile(&self, grid_x: u16, grid_y: u16) -> Option<&BitMap2D> {
-        self.tiles
-            .iter()
-            .find(|(x, y, _)| *x == grid_x && *y == grid_y)
-            .map(|(_, _, bm)| bm)
+    pub(crate) fn find_tile(&self, grid_x: u16, grid_y: u16) -> Option<&BitMap2D> {
+        let dx = grid_x.checked_sub(self.grid_origin_x)? as usize;
+        let dy = grid_y.checked_sub(self.grid_origin_y)? as usize;
+        if dx >= self.grid_w as usize || dy >= self.grid_h as usize {
+            return None;
+        }
+        self.tiles[dy * self.grid_w as usize + dx].as_ref()
     }
 
-    fn clamped_query_render_exp(&self, tile_z: u8, requested_render_exp: u8) -> u8 {
+    pub(crate) fn clamped_query_render_exp(&self, tile_z: u8, requested_render_exp: u8) -> u8 {
         let world_detail_exp = self.tile_grid_exp as i16 + self.tile_bitmap_exp as i16;
         let max_render_exp = (world_detail_exp - tile_z as i16).max(0) as u8;
         requested_render_exp.min(max_render_exp)
@@ -98,6 +103,8 @@ impl TileBuffer {
 
         if render_exp >= span {
             // Case 2: The queried tiles are larger than the TileBuffer's internal tile grid.
+            // TODO(opt): with the grid-indexed layout we could iterate the tiles slice
+            // directly instead of calling find_tile per (dx, dy).
             let sub_render_exp = render_exp - span;
             for dy in 0..subtiles_per_axis {
                 for dx in 0..subtiles_per_axis {
@@ -124,6 +131,7 @@ impl TileBuffer {
 
         // Case 3: The requested resolution is below the subtile grid resolution.
         // Reduce each internal tile to occupancy and OR into coarse output pixels.
+        // TODO(opt): same as Case 2 — direct grid slice iteration would avoid per-cell find_tile.
         let coarse_shift = span - render_exp;
         for dy in 0..subtiles_per_axis {
             for dx in 0..subtiles_per_axis {
@@ -150,102 +158,6 @@ impl TileBuffer {
         packed
     }
 
-    /// Convert tile pixels to mercator coordinates.
-    fn query_tile_mercator_pixels_internal(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-        tile_z: u8,
-        render_exp: u8,
-        pixel_type: PixelType,
-    ) -> Vec<f32> {
-        let render_exp = self.clamped_query_render_exp(tile_z, render_exp);
-
-        let cache_key = (tile_x, tile_y, tile_z, render_exp, pixel_type);
-        if let Some(cached) = self.mercator_cache.borrow().get(&cache_key) {
-            return cached.clone();
-        }
-
-        log::info!(
-            "cache missed: tile_x={}, tile_y={}, tile_z={}, render_exp={}, pixel_type={:?}",
-            tile_x,
-            tile_y,
-            tile_z,
-            render_exp,
-            pixel_type
-        );
-
-        let packed_pixels = self.get_tile_pixels(tile_x, tile_y, tile_z, render_exp);
-        if packed_pixels.is_empty() {
-            return Vec::new();
-        }
-
-        let Some(tiles_per_axis) = 1u32.checked_shl(tile_z as u32) else {
-            return Vec::new();
-        };
-        let tile_world_size = 1.0 / tiles_per_axis as f64;
-        let tile_merc_x0 = tile_x as f64 * tile_world_size;
-        let tile_merc_y0 = tile_y as f64 * tile_world_size;
-        let pixel_world_size = tile_world_size / (1u32 << render_exp) as f64;
-
-        let mut mercator_pixels = Vec::with_capacity(packed_pixels.len() * 2);
-        let mut idx = 0usize;
-        while idx + 1 < packed_pixels.len() {
-            let px = packed_pixels[idx] as f64;
-            let py = packed_pixels[idx + 1] as f64;
-            let merc_x = tile_merc_x0 + px * pixel_world_size;
-            let merc_y = tile_merc_y0 + py * pixel_world_size;
-            push_mercator_pixel(
-                &mut mercator_pixels,
-                pixel_type,
-                merc_x,
-                merc_y,
-                pixel_world_size,
-            );
-            idx += 2;
-        }
-
-        let mut cache = self.mercator_cache.borrow_mut();
-        if cache.len() >= PIXEL_CACHE_MAX_ENTRIES {
-            cache.clear();
-        }
-        cache.insert(cache_key, mercator_pixels.clone());
-
-        mercator_pixels
-    }
-
-    /// Split range query into tile queries and merge the results.
-    fn query_range_mercator_pixels_internal(
-        &self,
-        x: u32,
-        y: u32,
-        z: u8,
-        w: u32,
-        h: u32,
-        render_exp: u8,
-        pixel_type: PixelType,
-    ) -> Vec<f32> {
-        if w == 0 || h == 0 {
-            return Vec::new();
-        }
-
-        let mut out = Vec::new();
-        for dy in 0..h {
-            for dx in 0..w {
-                let Some(tile_x) = x.checked_add(dx) else {
-                    continue;
-                };
-                let Some(tile_y) = y.checked_add(dy) else {
-                    continue;
-                };
-                let tile_pixels = self
-                    .query_tile_mercator_pixels_internal(tile_x, tile_y, z, render_exp, pixel_type);
-                out.extend_from_slice(&tile_pixels);
-            }
-        }
-        out
-    }
-
     #[wasm_bindgen]
     /// Parses raw TileRangeResponse bytes returned by the `/tile-range` endpoint.
     ///
@@ -261,7 +173,7 @@ impl TileBuffer {
         let header = parse_tile_range_header(&decompressed)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse TileRange header: {}", e)))?;
         let body = &decompressed[16..];
-        let tiles = parse_tiles_from_body(
+        let parsed = parse_tiles_from_body(
             header.tile_bitmap_exp,
             header.x0,
             header.y0,
@@ -271,7 +183,18 @@ impl TileBuffer {
             body,
         )
         .map_err(|e| JsValue::from_str(&format!("Failed to parse TileRangeResponse: {}", e)))?;
+        let grid_w = header.range_w;
+        let grid_h = header.range_h;
+        let mut tiles = vec![None; grid_w as usize * grid_h as usize];
+        for (x, y, bm) in parsed {
+            let idx = (y - header.y0) as usize * grid_w as usize + (x - header.x0) as usize;
+            tiles[idx] = Some(bm);
+        }
         Ok(TileBuffer {
+            grid_origin_x: header.x0,
+            grid_origin_y: header.y0,
+            grid_w,
+            grid_h,
             tiles,
             _level0_exp: level0_exp,
             tile_grid_exp: header.z,
@@ -288,18 +211,13 @@ impl TileBuffer {
 
     #[wasm_bindgen]
     pub fn tile_count(&self) -> u32 {
-        self.tiles.len() as u32
-    }
-
-    #[wasm_bindgen]
-    pub fn clear_cache(&self) {
-        self.mercator_cache.borrow_mut().clear();
+        self.tiles.iter().filter(|t| t.is_some()).count() as u32
     }
 
     #[wasm_bindgen]
     pub fn total_pixel_count(&self) -> u32 {
         let mut count = 0u32;
-        for (_, _, bm) in &self.tiles {
+        for bm in self.tiles.iter().filter_map(|t| t.as_ref()) {
             count += bm
                 .iter_pixels(0, 0, 0, 0, 0, self.tile_bitmap_exp as i16)
                 .count() as u32;
@@ -339,44 +257,6 @@ impl TileBuffer {
         out
     }
 
-    #[wasm_bindgen]
-    pub fn query_range_mercator_pixels(
-        &self,
-        x: u32,
-        y: u32,
-        z: u8,
-        w: u32,
-        h: u32,
-        render_exp: u8,
-    ) -> Vec<f32> {
-        self.query_range_mercator_pixels_internal(x, y, z, w, h, render_exp, PixelType::Pixel32)
-    }
-
-    #[wasm_bindgen]
-    pub fn query_range_mercator_pixels64(
-        &self,
-        x: u32,
-        y: u32,
-        z: u8,
-        w: u32,
-        h: u32,
-        render_exp: u8,
-    ) -> Vec<f32> {
-        self.query_range_mercator_pixels_internal(x, y, z, w, h, render_exp, PixelType::Pixel64)
-    }
-
-    #[wasm_bindgen]
-    pub fn query_range_mercator_triangles(
-        &self,
-        x: u32,
-        y: u32,
-        z: u8,
-        w: u32,
-        h: u32,
-        render_exp: u8,
-    ) -> Vec<f32> {
-        self.query_range_mercator_pixels_internal(x, y, z, w, h, render_exp, PixelType::Triangle64)
-    }
 }
 
 #[wasm_bindgen]
